@@ -1,0 +1,26 @@
+name: Project CI
+
+on:
+  push:
+    branches: [ main, dev ]
+  pull_request:
+    branches: [ main, dev ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust-projects:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: Swatinem/rust-cache@v1
+        with:
+          working-directory: .
+      - uses: extractions/setup-just@v1
+      - name: Install libusb
+        run: sudo apt install -y libusb-dev libusb-1.0-0 libusb-1.0-0-dev
+      - name: Build
+        run: just check
+      - name: Run tests
+        run: just test
