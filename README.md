@@ -35,3 +35,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 ```
+
+# Disclaimer
+
+I provide no guarantees or warranties for the code or the functionality provided. **Use at your own risk.**
