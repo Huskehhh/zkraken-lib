@@ -5,10 +5,6 @@ use hidapi::HidDevice;
 pub const PUMP_ENDPOINT_ADDRESS: u8 = 0x1;
 pub const FAN_ENDPOINT_ADDRESS: u8 = 0x2;
 
-pub const WRITE_ENDPOINT_ADDRESS: u8 = 0x1;
-pub const BULK_WRITE_ENDPOINT_ADDRESS: u8 = 0x2;
-pub const READ_ENDPOINT_ADDRESS: u8 = 0x81;
-
 pub const WRITE_LENGTH: usize = 64;
 pub const BULK_WRITE_LENGTH: usize = 512;
 
