@@ -315,10 +315,7 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
 
         self.setup_bucket(index, index + 1, memory_slot, memory_slot_count)?;
         self.write_start_bucket(index)?;
-
-        println!("Sending bulk data info!");
         self.send_bulk_data_info(2)?;
-        println!("Sent bulk data info!");
 
         // Time to write the image bytes!
         self.bulk_endpoint_handle
