@@ -45,12 +45,19 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
         bulk_endpoint_handle: &'a mut DeviceHandle<T>,
         rotation_degrees: i32,
     ) -> Result<NZXTDevice<'a, T>> {
+        // Set auto detach kernel driver.
+        bulk_endpoint_handle.set_auto_detach_kernel_driver(true)?;
+
+        // Claim the interface that the BULK endpoint is on.
+        bulk_endpoint_handle.claim_interface(0)?;
+
         let mut nzxt_device = NZXTDevice {
             device,
             bulk_endpoint_handle,
             rotation_degrees,
         };
 
+        // Init the device.
         nzxt_device.initialise()?;
 
         Ok(nzxt_device)
@@ -268,10 +275,6 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
 
         let (width, height) = img.dimensions();
 
-        if width != 320 && height != 320 {
-            img = img.resize(320, 320, image::imageops::FilterType::Nearest);
-        }
-
         if self.rotation_degrees == 90 {
             img = img.rotate90();
         } else if self.rotation_degrees == 180 {
@@ -280,11 +283,15 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
             img = img.rotate270();
         }
 
-        let image_bytes = img.as_bytes();
+        if width != 320 && height != 320 {
+            img = img.resize_exact(320, 320, image::imageops::FilterType::Gaussian);
+        }
+
+        let image_bytes = img.to_rgba8().into_raw();
         let image_size_bytes = image_bytes.len() as i32;
 
         self.upload_image(
-            image_bytes,
+            &image_bytes,
             image_size_bytes,
             index,
             apply_image_after_upload,
@@ -314,12 +321,13 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
         println!("Sent bulk data info!");
 
         // Time to write the image bytes!
-        self.write_bulk(image_bytes)?;
+        self.bulk_endpoint_handle
+            .write_bulk(0x02, image_bytes, BULK_TIMEOUT)?;
 
         self.write_finish_bucket(index)?;
 
         if apply_image_after_upload {
-            self.set_visual_mode(2, index)?;
+            self.set_visual_mode(4, index)?;
         }
 
         Ok(())
