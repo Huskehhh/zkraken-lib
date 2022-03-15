@@ -1,26 +1,21 @@
 use std::path::Path;
 
 use color_eyre::Result;
-use rusb::Context;
-use zkraken_lib::{open_device, NZXTDevice, PID, VID};
+use rusb::{open_device_with_vid_pid, set_log_level};
+use zkraken_lib::{NZXTDevice, PID, VID};
 
 fn main() -> Result<()> {
+    // We need to use RUSB as well because HIDAPI doesn't support the writing to BULK endpoint.
+    let mut handle = open_device_with_vid_pid(VID, PID).expect("No Kraken Z device found!");
     let api = hidapi_rusb::HidApi::new()?;
-    let mut context = Context::new()?;
     let hid_device = api.open(VID, PID)?;
 
-    // We need to use RUSB as well because HIDAPI doesn't support the writing to BULK endpoint.
-    let (_, mut handle) =
-        open_device(&mut context, VID, PID).expect("No NZXT Kraken Z device found.");
+    set_log_level(rusb::LogLevel::Debug);
 
-    let mut nzxt_device = NZXTDevice {
-        device: &hid_device,
-        bulk_endpoint_handle: &mut handle,
-        initialised: false,
-        rotation_degrees: 270,
-    };
+    handle.set_auto_detach_kernel_driver(true)?;
+    handle.claim_interface(0)?;
 
-    nzxt_device.initialise()?;
+    let nzxt_device = NZXTDevice::new(&hid_device, &mut handle, 270)?;
 
     let firmware = nzxt_device.get_firmware_version()?;
     println!("Firmware version: {}", firmware);

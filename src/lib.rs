@@ -5,7 +5,6 @@ use color_eyre::eyre::eyre;
 use color_eyre::eyre::Result;
 use hidapi_rusb::HidDevice;
 use image::GenericImageView;
-use rusb::Device;
 use rusb::DeviceHandle;
 use rusb::UsbContext;
 
@@ -27,7 +26,6 @@ pub const PID: u16 = 0x3008;
 pub struct NZXTDevice<'a, T: UsbContext> {
     pub device: &'a HidDevice,
     pub bulk_endpoint_handle: &'a mut DeviceHandle<T>,
-    pub initialised: bool,
     pub rotation_degrees: i32,
 }
 
@@ -41,13 +39,21 @@ pub struct DeviceStatus {
 }
 
 impl<T: UsbContext> NZXTDevice<'_, T> {
-    /// Check if the device is initialised.
-    fn check_if_initalised(&self) -> Result<()> {
-        if !self.initialised {
-            return Err(eyre!("NZXTDevice not initialised."));
-        }
+    /// Create an instance of NZXTDevice.
+    pub fn new<'a>(
+        device: &'a HidDevice,
+        bulk_endpoint_handle: &'a mut DeviceHandle<T>,
+        rotation_degrees: i32,
+    ) -> Result<NZXTDevice<'a, T>> {
+        let mut nzxt_device = NZXTDevice {
+            device,
+            bulk_endpoint_handle,
+            rotation_degrees,
+        };
 
-        Ok(())
+        nzxt_device.initialise()?;
+
+        Ok(nzxt_device)
     }
 
     /// Initialise the NZXT device.
@@ -56,8 +62,6 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
 
         // We read here to throw away the response bytes.
         self.read()?;
-
-        self.initialised = true;
 
         Ok(())
     }
@@ -112,7 +116,6 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
 
     /// Return the status of the device.
     pub fn get_status(&self) -> Result<DeviceStatus> {
-        self.check_if_initalised()?;
         self.clear_read_buffer()?;
 
         self.write(&[0x74, 0x01])?;
@@ -148,8 +151,6 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
 
     /// Set the given duty for the specified endpoint.
     fn set_duty(&self, duty: u8, address: u8) -> Result<()> {
-        self.check_if_initalised()?;
-
         if (20..=100).contains(&duty) {
             let mut buffer = [0u8; WRITE_LENGTH];
 
@@ -176,8 +177,6 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
 
     /// Get the firmware version from the device.
     pub fn get_firmware_version(&self) -> Result<String> {
-        self.check_if_initalised()?;
-
         // Request firmware info.
         self.write(&[0x10, 0x01])?;
 
@@ -190,8 +189,6 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
 
     /// Set the visual mode for the device.
     pub fn set_visual_mode(&self, mode: u8, index: u8) -> Result<()> {
-        self.check_if_initalised()?;
-
         let mut buffer = [0u8; WRITE_LENGTH];
 
         buffer.fill(0x0);
@@ -208,8 +205,6 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
 
     /// Clear the memory bucket at given index.
     pub fn clear_bucket(&self, index: u8) -> Result<()> {
-        self.check_if_initalised()?;
-
         let mut buffer = [0u8; WRITE_LENGTH];
 
         buffer.fill(0x0);
@@ -240,8 +235,6 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
 
     /// Set the device LCD brightness.
     pub fn set_brightness(&self, brightness: u8) -> Result<()> {
-        self.check_if_initalised()?;
-
         if (0..=100).contains(&brightness) {
             let mut buffer = [0u8; WRITE_LENGTH];
             buffer.fill(0x0);
@@ -271,8 +264,6 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
         index: u8,
         apply_image_after_upload: bool,
     ) -> Result<()> {
-        self.check_if_initalised()?;
-
         let mut img = image::open(path_to_image)?;
 
         let (width, height) = img.dimensions();
@@ -309,8 +300,6 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
         index: u8,
         apply_image_after_upload: bool,
     ) -> Result<()> {
-        self.check_if_initalised()?;
-
         self.set_visual_mode(1, index)?;
         self.clear_bucket(index)?;
 
@@ -319,7 +308,10 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
 
         self.setup_bucket(index, index + 1, memory_slot, memory_slot_count)?;
         self.write_start_bucket(index)?;
+
+        println!("Sending bulk data info!");
         self.send_bulk_data_info(2)?;
+        println!("Sent bulk data info!");
 
         // Time to write the image bytes!
         self.write_bulk(image_bytes)?;
@@ -341,8 +333,6 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
         memory_slot: u16,
         memory_slot_count: u16,
     ) -> Result<()> {
-        self.check_if_initalised()?;
-
         let mut buffer = [0u8; WRITE_LENGTH];
 
         buffer.fill(0x0);
@@ -364,8 +354,6 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
 
     /// Send the write start to given bucket.
     pub fn write_start_bucket(&self, index: u8) -> Result<()> {
-        self.check_if_initalised()?;
-
         let mut buffer = [0u8; WRITE_LENGTH];
 
         buffer.fill(0x0);
@@ -380,8 +368,6 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
     }
 
     pub fn write_finish_bucket(&self, index: u8) -> Result<()> {
-        self.check_if_initalised()?;
-
         let mut buffer = [0u8; WRITE_LENGTH];
 
         buffer.fill(0x0);
@@ -396,8 +382,6 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
     }
 
     pub fn send_bulk_data_info(&self, mode: u8) -> Result<()> {
-        self.check_if_initalised()?;
-
         let mut buffer = [0u8; BULK_WRITE_LENGTH];
         buffer.fill(0x0);
 
@@ -415,7 +399,7 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
         buffer[10] = 0x32;
         buffer[11] = 0x10;
         buffer[12] = mode;
-        // ...
+        // More magic?
         buffer[17] = 0x40;
         buffer[18] = 0x96;
 
@@ -432,32 +416,4 @@ fn parse_firmware_info(data: &[u8]) -> String {
     let patch = data[0x13];
 
     format!("version {}.{}.{}", major, minor, patch)
-}
-
-/// Opens a device and returns a handle to it.
-pub fn open_device<T: UsbContext>(
-    context: &mut T,
-    vid: u16,
-    pid: u16,
-) -> Option<(Device<T>, DeviceHandle<T>)> {
-    let devices = match context.devices() {
-        Ok(d) => d,
-        Err(_) => return None,
-    };
-
-    for device in devices.iter() {
-        let device_desc = match device.device_descriptor() {
-            Ok(d) => d,
-            Err(_) => continue,
-        };
-
-        if device_desc.vendor_id() == vid && device_desc.product_id() == pid {
-            match device.open() {
-                Ok(handle) => return Some((device, handle)),
-                Err(_) => continue,
-            }
-        }
-    }
-
-    None
 }
