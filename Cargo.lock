@@ -840,4 +840,5 @@ dependencies = [
  "color-eyre",
  "hidapi-rusb",
  "image",
+ "rusb",
 ]

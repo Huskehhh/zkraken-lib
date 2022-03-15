@@ -1,9 +1,13 @@
 use std::path::Path;
+use std::time::Duration;
 
 use color_eyre::eyre::eyre;
 use color_eyre::eyre::Result;
 use hidapi_rusb::HidDevice;
 use image::GenericImageView;
+use rusb::Device;
+use rusb::DeviceHandle;
+use rusb::UsbContext;
 
 pub const PUMP_ENDPOINT_ADDRESS: u8 = 0x1;
 pub const FAN_ENDPOINT_ADDRESS: u8 = 0x2;
@@ -14,12 +18,15 @@ pub const BULK_WRITE_LENGTH: usize = 512;
 pub const READ_LENGTH: usize = 64;
 pub const BULK_READ_LENGTH: usize = 512;
 
+pub const BULK_TIMEOUT: Duration = std::time::Duration::from_secs(10);
+
 // Kraken Z series.
 pub const VID: u16 = 0x1e71;
 pub const PID: u16 = 0x3008;
 
-pub struct NZXTDevice<'a> {
+pub struct NZXTDevice<'a, T: UsbContext> {
     pub device: &'a HidDevice,
+    pub bulk_endpoint_handle: &'a mut DeviceHandle<T>,
     pub initialised: bool,
     pub rotation_degrees: i32,
 }
@@ -33,7 +40,7 @@ pub struct DeviceStatus {
     pub fan_duty: i32,
 }
 
-impl NZXTDevice<'_> {
+impl<T: UsbContext> NZXTDevice<'_, T> {
     /// Check if the device is initialised.
     fn check_if_initalised(&self) -> Result<()> {
         if !self.initialised {
@@ -67,6 +74,20 @@ impl NZXTDevice<'_> {
 
         // Write to the USB device via the endpoint.
         self.device.write(data)?;
+
+        Ok(())
+    }
+
+    /// Write BULK raw bytes to the NZXT device.
+    fn write_bulk(&self, data: &[u8]) -> Result<()> {
+        let mut buf = [0u8; BULK_WRITE_LENGTH];
+        buf.fill(0x0);
+
+        buf.copy_from_slice(data);
+
+        // Write to the USB device via the endpoint.
+        self.bulk_endpoint_handle
+            .write_bulk(0x02, &buf, BULK_TIMEOUT)?;
 
         Ok(())
     }
@@ -301,7 +322,8 @@ impl NZXTDevice<'_> {
         self.send_bulk_data_info(2)?;
 
         // Time to write the image bytes!
-        self.device.write(image_bytes)?;
+        self.write_bulk(image_bytes)?;
+
         self.write_finish_bucket(index)?;
 
         if apply_image_after_upload {
@@ -397,6 +419,8 @@ impl NZXTDevice<'_> {
         buffer[17] = 0x40;
         buffer[18] = 0x96;
 
+        self.write_bulk(&buffer)?;
+
         Ok(())
     }
 }
@@ -408,4 +432,32 @@ fn parse_firmware_info(data: &[u8]) -> String {
     let patch = data[0x13];
 
     format!("version {}.{}.{}", major, minor, patch)
+}
+
+/// Opens a device and returns a handle to it.
+pub fn open_device<T: UsbContext>(
+    context: &mut T,
+    vid: u16,
+    pid: u16,
+) -> Option<(Device<T>, DeviceHandle<T>)> {
+    let devices = match context.devices() {
+        Ok(d) => d,
+        Err(_) => return None,
+    };
+
+    for device in devices.iter() {
+        let device_desc = match device.device_descriptor() {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+
+        if device_desc.vendor_id() == vid && device_desc.product_id() == pid {
+            match device.open() {
+                Ok(handle) => return Some((device, handle)),
+                Err(_) => continue,
+            }
+        }
+    }
+
+    None
 }

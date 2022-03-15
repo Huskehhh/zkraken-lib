@@ -1,14 +1,21 @@
 use std::path::Path;
 
 use color_eyre::Result;
-use zkraken_lib::{NZXTDevice, PID, VID};
+use rusb::Context;
+use zkraken_lib::{open_device, NZXTDevice, PID, VID};
 
 fn main() -> Result<()> {
     let api = hidapi_rusb::HidApi::new()?;
-    let device = api.open(VID, PID)?;
+    let mut context = Context::new()?;
+    let hid_device = api.open(VID, PID)?;
+
+    // We need to use RUSB as well because HIDAPI doesn't support the writing to BULK endpoint.
+    let (_, mut handle) =
+        open_device(&mut context, VID, PID).expect("No NZXT Kraken Z device found.");
 
     let mut nzxt_device = NZXTDevice {
-        device: &device,
+        device: &hid_device,
+        bulk_endpoint_handle: &mut handle,
         initialised: false,
         rotation_degrees: 270,
     };
@@ -22,8 +29,9 @@ fn main() -> Result<()> {
     println!("Status: {:?}", status);
 
     nzxt_device.set_fan_duty(80)?;
+    nzxt_device.set_pump_duty(80)?;
 
-    let image = Path::new("C:\\Users\\me\\Documents\\zkraken-lib\\elmo.gif");
+    let image = Path::new("C:\\Users\\me\\Downloads\\elmo.gif");
 
     nzxt_device.set_image(image, 3, true)?;
 
