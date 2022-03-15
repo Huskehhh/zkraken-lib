@@ -29,7 +29,6 @@ fn main() -> Result<()> {
     nzxt_device.set_pump_duty(80)?;
 
     let status = nzxt_device.get_status()?;
-
     println!("Status: {:?}", status);
 
     Ok(())
