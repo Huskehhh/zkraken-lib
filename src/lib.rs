@@ -3,25 +3,24 @@ use std::time::Duration;
 
 use color_eyre::eyre::eyre;
 use color_eyre::eyre::Result;
-use hidapi_rusb::HidDevice;
 use image::GenericImageView;
 use rusb::DeviceHandle;
 use rusb::UsbContext;
 
-pub const PUMP_ENDPOINT_ADDRESS: u8 = 0x1;
-pub const FAN_ENDPOINT_ADDRESS: u8 = 0x2;
-
-pub const WRITE_LENGTH: usize = 64;
-pub const BULK_WRITE_LENGTH: usize = 512;
-
-pub const READ_LENGTH: usize = 64;
-pub const BULK_READ_LENGTH: usize = 512;
-
-pub const BULK_TIMEOUT: Duration = std::time::Duration::from_secs(10);
-
 // Kraken Z series.
 pub const VID: u16 = 0x1e71;
 pub const PID: u16 = 0x3008;
+
+const PUMP_ENDPOINT_ADDRESS: u8 = 0x1;
+const FAN_ENDPOINT_ADDRESS: u8 = 0x2;
+
+const WRITE_LENGTH: usize = 64;
+const BULK_WRITE_LENGTH: usize = 512;
+
+const READ_LENGTH: usize = 64;
+
+const WRITE_TIMEOUT: Duration = std::time::Duration::from_secs(10);
+const READ_TIMEOUT: Duration = std::time::Duration::from_secs(3);
 
 const SETUP_BUCKET: u8 = 0x32;
 const SET_BUCKET: u8 = 0x1;
@@ -33,11 +32,12 @@ const WRITE_SETUP: u8 = 0x36;
 const WRITE_START: u8 = 0x1;
 const WRITE_FINISH: u8 = 0x2;
 
+const INTERRUPT_WRITE_ENDPOINT: u8 = 0x01;
+const INTERRUPT_READ_ENDPOINT: u8 = 0x81;
 const BULK_WRITE_ENDPOINT: u8 = 0x02;
 
 pub struct NZXTDevice<'a, T: UsbContext> {
-    pub device: &'a HidDevice,
-    pub bulk_endpoint_handle: &'a mut DeviceHandle<T>,
+    pub handle: &'a mut DeviceHandle<T>,
     pub rotation_degrees: i32,
 }
 
@@ -52,36 +52,20 @@ pub struct DeviceStatus {
 
 impl<T: UsbContext> NZXTDevice<'_, T> {
     /// Create an instance of NZXTDevice.
-    pub fn new<'a>(
-        device: &'a HidDevice,
-        bulk_endpoint_handle: &'a mut DeviceHandle<T>,
-        rotation_degrees: i32,
-    ) -> Result<NZXTDevice<'a, T>> {
-        // Set auto detach kernel driver.
-        bulk_endpoint_handle.set_auto_detach_kernel_driver(true)?;
+    pub fn new(handle: &mut DeviceHandle<T>, rotation_degrees: i32) -> Result<NZXTDevice<T>> {
+        handle.set_auto_detach_kernel_driver(true)?;
+        handle.claim_interface(0)?;
+        handle.claim_interface(1)?;
 
-        // Claim the interface that the BULK endpoint is on.
-        bulk_endpoint_handle.claim_interface(0)?;
-
-        let mut nzxt_device = NZXTDevice {
-            device,
-            bulk_endpoint_handle,
+        let nzxt_device = NZXTDevice {
+            handle,
             rotation_degrees,
         };
 
-        // Init the device.
-        nzxt_device.initialise()?;
+        // Throw away the response bytes.
+        nzxt_device.read()?;
 
         Ok(nzxt_device)
-    }
-
-    /// Initialise the NZXT device.
-    pub fn initialise(&mut self) -> Result<()> {
-        self.write(&[0x70, 0x01])?;
-
-        self.clear_read_buffer()?;
-
-        Ok(())
     }
 
     /// Write INTERRUPT raw bytes to the NZXT device.
@@ -95,7 +79,8 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
         }
 
         // Write to the USB device via the endpoint.
-        self.device.write(data)?;
+        self.handle
+            .write_interrupt(INTERRUPT_WRITE_ENDPOINT, data, WRITE_TIMEOUT)?;
 
         Ok(())
     }
@@ -105,11 +90,11 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
         let mut buf = [0u8; BULK_WRITE_LENGTH];
         buf.fill(0x0);
 
-        buf.copy_from_slice(data);
+        buf[0..data.len()].copy_from_slice(data);
 
         // Write to the USB device via the endpoint.
-        self.bulk_endpoint_handle
-            .write_bulk(0x02, &buf, BULK_TIMEOUT)?;
+        self.handle
+            .write_bulk(BULK_WRITE_ENDPOINT, &buf, WRITE_TIMEOUT)?;
 
         Ok(())
     }
@@ -118,27 +103,21 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
     fn read(&self) -> Result<Vec<u8>> {
         let mut buf = [0u8; READ_LENGTH];
 
-        Ok(self.device.read(&mut buf).map(|_| buf.to_vec())?)
-    }
-
-    /// Force clear the previous read buffer so that new data can be reported.
-    fn clear_read_buffer(&self) -> Result<()> {
-        let mut buf = [0u8; 1];
-
-        while self.device.read_timeout(&mut buf, 3)? > 0 {
-            // Do nothing.
-        }
-
-        Ok(())
+        Ok(self
+            .handle
+            .read_interrupt(INTERRUPT_READ_ENDPOINT, &mut buf, READ_TIMEOUT)
+            .map(|_| buf.to_vec())?)
     }
 
     /// Return the status of the device.
     pub fn get_status(&self) -> Result<DeviceStatus> {
-        self.clear_read_buffer()?;
-
         self.write(&[0x74, 0x01])?;
         let data = self.read()?;
+        self.parse_status(&data)
+    }
 
+    /// Parse the response bytes into a device status.
+    fn parse_status(&self, data: &[u8]) -> Result<DeviceStatus> {
         // Liquid temp.
         let temp = (data[15] + data[16] / 10) as i32;
         let pump_rpm = ((data[18] as i32) << 8) | (data[17] as i32);
@@ -195,8 +174,6 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
 
     /// Get the firmware version from the device.
     pub fn get_firmware_version(&self) -> Result<String> {
-        self.clear_read_buffer()?;
-
         // Request firmware info.
         self.write(&[0x10, 0x01])?;
 
@@ -209,16 +186,7 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
 
     /// Set the visual mode for the device.
     pub fn set_visual_mode(&self, mode: u8, index: u8) -> Result<()> {
-        let mut buffer = [0u8; WRITE_LENGTH];
-
-        buffer.fill(0x0);
-
-        buffer[0] = SWITCH_BUCKET;
-        buffer[1] = 0x1;
-        buffer[2] = mode;
-        buffer[3] = index;
-
-        self.write(&buffer)?;
+        self.write(&[SWITCH_BUCKET, 0x1, mode, index])?;
 
         Ok(())
     }
@@ -228,6 +196,7 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
         self.set_visual_mode(4, index)
     }
 
+    /// Delete all memory buckets from the device.
     pub fn delete_all_buckets(&self) -> Result<()> {
         for i in 0..15 {
             self.delete_bucket(i)?;
@@ -238,32 +207,12 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
 
     /// Send query bucket for given index.
     pub fn send_query_bucket(&self, index: u8) -> Result<()> {
-        let mut buffer = [0u8; WRITE_LENGTH];
-
-        buffer.fill(0x0);
-
-        buffer[0] = QUERY_BUCKET;
-        buffer[1] = 0x04;
-        buffer[3] = index;
-
-        self.write(&buffer)?;
-
-        Ok(())
+        self.write(&[QUERY_BUCKET, 0x04, 0x00, index])
     }
 
     /// Clear the memory bucket at given index.
     pub fn delete_bucket(&self, index: u8) -> Result<()> {
-        let mut buffer = [0u8; WRITE_LENGTH];
-
-        buffer.fill(0x0);
-
-        buffer[0] = SETUP_BUCKET;
-        buffer[1] = DELETE_BUCKET;
-        buffer[2] = index;
-
-        self.write(&buffer)?;
-
-        Ok(())
+        self.write(&[SETUP_BUCKET, DELETE_BUCKET, index])
     }
 
     /// Set the device LCD to display liquid temperature.
@@ -284,28 +233,15 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
     /// Set the device LCD brightness.
     pub fn set_brightness(&self, brightness: u8) -> Result<()> {
         if (0..=100).contains(&brightness) {
-            let mut buffer = [0u8; WRITE_LENGTH];
-            buffer.fill(0x0);
-
-            // QUERY
-            buffer[0] = 0x30;
-
-            // BRIGHTNESS
-            buffer[1] = 0x2;
-
-            // SET
-            buffer[2] = 0x1;
-
-            buffer[3] = brightness;
-
-            self.write(&buffer)?;
-
-            return Ok(());
+            return self.write(&[0x30, 0x2, 0x1, brightness]);
         }
 
         Err(eyre!("Duty value is out of bounds"))
     }
 
+    /// Set the device LCD to an image. Will be resized if it does not have height or width of 320px
+    /// Will rotate to the NZXTDevice rotation_degrees amount prior to uploading.
+    /// Does NOT support gif.
     pub fn set_image(
         &self,
         path_to_image: &Path,
@@ -341,6 +277,7 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
         Ok(())
     }
 
+    /// Upload an image (either still or gif) to the device.
     fn upload_image(
         &self,
         image_bytes: &[u8],
@@ -360,8 +297,8 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
         self.send_bulk_data_info(2)?;
 
         // Write image bytes to BULK endpoint.
-        self.bulk_endpoint_handle
-            .write_bulk(BULK_WRITE_ENDPOINT, image_bytes, BULK_TIMEOUT)?;
+        self.handle
+            .write_bulk(BULK_WRITE_ENDPOINT, image_bytes, WRITE_TIMEOUT)?;
 
         self.write_finish_bucket(index)?;
 
@@ -380,87 +317,54 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
         memory_slot: u16,
         memory_slot_count: u16,
     ) -> Result<()> {
-        let mut buffer = [0u8; WRITE_LENGTH];
-
-        buffer.fill(0x0);
-
-        buffer[0] = SETUP_BUCKET;
-        buffer[1] = SET_BUCKET;
-        buffer[2] = index;
-        buffer[3] = id;
-        buffer[4] = (memory_slot >> 8) as u8;
-        buffer[5] = memory_slot as u8;
-        buffer[6] = memory_slot_count as u8;
-        buffer[7] = (memory_slot_count >> 8) as u8;
-        buffer[8] = 1;
-
-        self.write(&buffer)?;
-
-        Ok(())
+        self.write(&[
+            SETUP_BUCKET,
+            SET_BUCKET,
+            index,
+            id,
+            (memory_slot >> 8) as u8,
+            memory_slot as u8,
+            memory_slot_count as u8,
+            (memory_slot_count >> 8) as u8,
+            1,
+        ])
     }
 
     /// Send the write start to given bucket.
     pub fn write_start_bucket(&self, index: u8) -> Result<()> {
-        let mut buffer = [0u8; WRITE_LENGTH];
-
-        buffer.fill(0x0);
-
-        buffer[0] = WRITE_SETUP;
-        buffer[1] = WRITE_START;
-        buffer[2] = index;
-
-        self.write(&buffer)?;
-
-        Ok(())
+        self.write(&[WRITE_SETUP, WRITE_START, index])
     }
 
+    /// Send the write finish to given bucket.
     pub fn write_finish_bucket(&self, index: u8) -> Result<()> {
-        let mut buffer = [0u8; WRITE_LENGTH];
-
-        buffer.fill(0x0);
-
-        buffer[0] = WRITE_SETUP;
-        buffer[1] = WRITE_FINISH;
-        buffer[2] = index;
-
-        self.write(&buffer)?;
-
-        Ok(())
+        self.write(&[WRITE_SETUP, WRITE_FINISH, index])
     }
 
+    /// Send the bulk data info for the given mode.
     pub fn send_bulk_data_info(&self, mode: u8) -> Result<()> {
-        let mut buffer = [0u8; BULK_WRITE_LENGTH];
-        buffer.fill(0x0);
-
-        // Fill with 12fa01e8abcdef987654321 (magic numbers) and then mode.
-        buffer[0] = 0x12;
-        buffer[1] = 0xfa;
-        buffer[2] = 0x01;
-        buffer[3] = 0xe8;
-        buffer[4] = 0xab;
-        buffer[5] = 0xcd;
-        buffer[6] = 0xef;
-        buffer[7] = 0x98;
-        buffer[8] = 0x76;
-        buffer[9] = 0x54;
-        buffer[10] = 0x32;
-        buffer[11] = 0x10;
-        buffer[12] = mode;
-        // More magic?
-        buffer[17] = 0x40;
-        buffer[18] = 0x96;
-
-        self.write_bulk(&buffer)?;
-
-        Ok(())
+        // Fill with 12fa01e8abcdef987654321 (magic numbers) and then mode,
+        // couple of 0x00 and then more magic.
+        self.write_bulk(&[
+            0x12, 0xfa, 0x01, 0xe8, 0xab, 0xcd, 0xef, 0x98, 0x76, 0x54, 0x32, 0x10, mode, 0x00,
+            0x00, 0x00, 0x00, 0x40, 0x96,
+        ])
     }
 }
 
 impl<T: UsbContext> Drop for NZXTDevice<'_, T> {
+    /// Upon dropping NZXTDevice, ensure all interfaces are released and the device is reset.
     fn drop(&mut self) {
-        self.bulk_endpoint_handle
+        self.handle
             .release_interface(0)
-            .expect("Error releasing interface 0 for NZXTDevice");
+            .expect("Error releasing interface 0 for NZXTDevice.");
+
+        self.handle
+            .release_interface(1)
+            .expect("Error releasing interface 0 for NZXTDevice.");
+
+        self.handle
+            .reset()
+            .expect("Error resetting the NZXTDevice.");
     }
 }
 
