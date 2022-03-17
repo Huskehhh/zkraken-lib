@@ -246,7 +246,7 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
         &self,
         path_to_image: &Path,
         index: u8,
-        apply_image_after_upload: bool,
+        apply_after_upload: bool,
     ) -> Result<()> {
         let mut img = image::open(path_to_image)?;
 
@@ -267,14 +267,7 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
         let image_bytes = img.to_rgba8().into_raw();
         let image_size_bytes = image_bytes.len() as i32;
 
-        self.upload_image(
-            &image_bytes,
-            image_size_bytes,
-            index,
-            apply_image_after_upload,
-        )?;
-
-        Ok(())
+        self.upload_image(&image_bytes, image_size_bytes, index, apply_after_upload)
     }
 
     /// Upload an image (either still or gif) to the device.
@@ -283,7 +276,7 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
         image_bytes: &[u8],
         image_size_bytes: i32,
         index: u8,
-        apply_image_after_upload: bool,
+        apply_after_upload: bool,
     ) -> Result<()> {
         self.set_blank_screen()?;
         self.delete_bucket(index)?;
@@ -302,7 +295,7 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
 
         self.write_finish_bucket(index)?;
 
-        if apply_image_after_upload {
+        if apply_after_upload {
             self.switch_bucket(index)?;
         }
 
