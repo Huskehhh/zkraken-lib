@@ -7,6 +7,6 @@ description = "A cross-platform driver library for the Kraken Z series AIO coole
 license = "MIT"
 
 [dependencies]
-rusb = "0.9"
+rusb = { git = "https://github.com/a1ien/rusb" }
 color-eyre = "0.6"
 image = "0.24"

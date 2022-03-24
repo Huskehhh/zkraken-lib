@@ -53,6 +53,7 @@ pub struct DeviceStatus {
 impl<T: UsbContext> NZXTDevice<'_, T> {
     /// Create an instance of NZXTDevice.
     pub fn new(handle: &mut DeviceHandle<T>, rotation_degrees: i32) -> Result<NZXTDevice<T>> {
+        #[cfg(not(target_os = "windows"))]
         handle.set_auto_detach_kernel_driver(true)?;
         handle.claim_interface(0)?;
         handle.claim_interface(1)?;
