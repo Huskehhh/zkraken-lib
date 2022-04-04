@@ -6,7 +6,8 @@ use color_eyre::eyre::eyre;
 use color_eyre::eyre::Result;
 #[cfg(not(target_os = "windows"))]
 use image::GenericImageView;
-use mockall::*;
+#[cfg(test)]
+use mockall::automock;
 use rusb::DeviceHandle;
 use rusb::UsbContext;
 
@@ -39,7 +40,7 @@ const INTERRUPT_WRITE_ENDPOINT: u8 = 0x01;
 const INTERRUPT_READ_ENDPOINT: u8 = 0x81;
 const BULK_WRITE_ENDPOINT: u8 = 0x02;
 
-#[automock]
+#[cfg_attr(test, automock)]
 pub trait NZXTDeviceHandle {
     fn claim_interface(&mut self, iface: u8) -> crate::Result<()>;
     fn write_interrupt(&self, endpoint: u8, buf: &[u8], timeout: Duration) -> crate::Result<usize>;
