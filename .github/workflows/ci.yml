@@ -21,7 +21,7 @@ jobs:
       - name: Install libusb
         run: sudo apt install -y libusb-dev libusb-1.0-0 libusb-1.0-0-dev
       - name: Install tarpaulin
-        run: cargo install tarpaulin
+        run: cargo install cargo-tarpaulin
       - name: Build
         run: just check
       - name: Run tests
