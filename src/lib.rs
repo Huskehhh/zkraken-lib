@@ -1,31 +1,99 @@
+#[cfg(not(target_os = "windows"))]
 use std::path::Path;
 use std::time::Duration;
 
 use color_eyre::eyre::eyre;
 use color_eyre::eyre::Result;
-use hidapi_rusb::HidDevice;
+#[cfg(not(target_os = "windows"))]
 use image::GenericImageView;
+use mockall::*;
 use rusb::DeviceHandle;
 use rusb::UsbContext;
-
-pub const PUMP_ENDPOINT_ADDRESS: u8 = 0x1;
-pub const FAN_ENDPOINT_ADDRESS: u8 = 0x2;
-
-pub const WRITE_LENGTH: usize = 64;
-pub const BULK_WRITE_LENGTH: usize = 512;
-
-pub const READ_LENGTH: usize = 64;
-pub const BULK_READ_LENGTH: usize = 512;
-
-pub const BULK_TIMEOUT: Duration = std::time::Duration::from_secs(10);
 
 // Kraken Z series.
 pub const VID: u16 = 0x1e71;
 pub const PID: u16 = 0x3008;
 
-pub struct NZXTDevice<'a, T: UsbContext> {
-    pub device: &'a HidDevice,
-    pub bulk_endpoint_handle: &'a mut DeviceHandle<T>,
+const PUMP_ENDPOINT_ADDRESS: u8 = 0x1;
+const FAN_ENDPOINT_ADDRESS: u8 = 0x2;
+
+const WRITE_LENGTH: usize = 64;
+const BULK_WRITE_LENGTH: usize = 512;
+
+const READ_LENGTH: usize = 64;
+
+const WRITE_TIMEOUT: Duration = std::time::Duration::from_secs(10);
+const READ_TIMEOUT: Duration = std::time::Duration::from_secs(3);
+
+const SETUP_BUCKET: u8 = 0x32;
+const SET_BUCKET: u8 = 0x1;
+const DELETE_BUCKET: u8 = 0x2;
+const QUERY_BUCKET: u8 = 0x30;
+const SWITCH_BUCKET: u8 = 0x38;
+
+const WRITE_SETUP: u8 = 0x36;
+const WRITE_START: u8 = 0x1;
+const WRITE_FINISH: u8 = 0x2;
+
+const INTERRUPT_WRITE_ENDPOINT: u8 = 0x01;
+const INTERRUPT_READ_ENDPOINT: u8 = 0x81;
+const BULK_WRITE_ENDPOINT: u8 = 0x02;
+
+#[automock]
+pub trait NZXTDeviceHandle {
+    fn claim_interface(&mut self, iface: u8) -> crate::Result<()>;
+    fn write_interrupt(&self, endpoint: u8, buf: &[u8], timeout: Duration) -> crate::Result<usize>;
+    fn write_bulk(&self, endpoint: u8, buf: &[u8], timeout: Duration) -> crate::Result<usize>;
+    fn read_interrupt(
+        &self,
+        endpoint: u8,
+        buf: &mut [u8],
+        timeout: Duration,
+    ) -> crate::Result<usize>;
+    fn release_interface(&mut self, iface: u8) -> Result<()>;
+    fn reset(&mut self) -> Result<()>;
+    #[cfg(not(target_os = "windows"))]
+    fn set_auto_detach_kernel_driver(&mut self, auto_detach: bool) -> Result<()>;
+}
+
+impl<T: UsbContext> NZXTDeviceHandle for DeviceHandle<T> {
+    fn claim_interface(&mut self, iface: u8) -> crate::Result<()> {
+        Ok(self.claim_interface(iface)?)
+    }
+
+    fn write_interrupt(&self, endpoint: u8, buf: &[u8], timeout: Duration) -> crate::Result<usize> {
+        Ok(self.write_interrupt(endpoint, buf, timeout)?)
+    }
+
+    fn write_bulk(&self, endpoint: u8, buf: &[u8], timeout: Duration) -> crate::Result<usize> {
+        Ok(self.write_bulk(endpoint, buf, timeout)?)
+    }
+
+    fn read_interrupt(
+        &self,
+        endpoint: u8,
+        buf: &mut [u8],
+        timeout: Duration,
+    ) -> crate::Result<usize> {
+        Ok(self.read_interrupt(endpoint, buf, timeout)?)
+    }
+
+    fn release_interface(&mut self, iface: u8) -> Result<()> {
+        Ok(self.release_interface(iface)?)
+    }
+
+    fn reset(&mut self) -> Result<()> {
+        Ok(self.reset()?)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn set_auto_detach_kernel_driver(&mut self, auto_detach: bool) -> Result<()> {
+        Ok(self.set_auto_detach_kernel_driver(auto_detach)?)
+    }
+}
+
+pub struct NZXTDevice<'a> {
+    handle: &'a mut dyn NZXTDeviceHandle,
     pub rotation_degrees: i32,
 }
 
@@ -38,39 +106,26 @@ pub struct DeviceStatus {
     pub fan_duty: i32,
 }
 
-impl<T: UsbContext> NZXTDevice<'_, T> {
+impl NZXTDevice<'_> {
     /// Create an instance of NZXTDevice.
-    pub fn new<'a>(
-        device: &'a HidDevice,
-        bulk_endpoint_handle: &'a mut DeviceHandle<T>,
-        rotation_degrees: i32,
-    ) -> Result<NZXTDevice<'a, T>> {
-        // Set auto detach kernel driver.
-        bulk_endpoint_handle.set_auto_detach_kernel_driver(true)?;
+    pub fn new(handle: &mut dyn NZXTDeviceHandle, rotation_degrees: i32) -> Result<NZXTDevice> {
+        #[cfg(not(target_os = "windows"))]
+        {
+            handle.set_auto_detach_kernel_driver(true)?;
+            handle.claim_interface(0)?;
+        }
 
-        // Claim the interface that the BULK endpoint is on.
-        bulk_endpoint_handle.claim_interface(0)?;
+        handle.claim_interface(1)?;
 
-        let mut nzxt_device = NZXTDevice {
-            device,
-            bulk_endpoint_handle,
+        let nzxt_device = NZXTDevice {
+            handle,
             rotation_degrees,
         };
 
-        // Init the device.
-        nzxt_device.initialise()?;
+        // Throw away the response bytes.
+        nzxt_device.read()?;
 
         Ok(nzxt_device)
-    }
-
-    /// Initialise the NZXT device.
-    pub fn initialise(&mut self) -> Result<()> {
-        self.write(&[0x70, 0x01])?;
-
-        // We read here to throw away the response bytes.
-        self.read()?;
-
-        Ok(())
     }
 
     /// Write INTERRUPT raw bytes to the NZXT device.
@@ -79,12 +134,13 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
         buf.fill(0x0);
 
         // Copy the data to a new buffer with the correct length.
-        if data.len() > WRITE_LENGTH {
-            buf.copy_from_slice(data);
+        if data.len() <= WRITE_LENGTH {
+            buf[..data.len()].copy_from_slice(data);
         }
 
         // Write to the USB device via the endpoint.
-        self.device.write(data)?;
+        self.handle
+            .write_interrupt(INTERRUPT_WRITE_ENDPOINT, &buf, WRITE_TIMEOUT)?;
 
         Ok(())
     }
@@ -94,11 +150,11 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
         let mut buf = [0u8; BULK_WRITE_LENGTH];
         buf.fill(0x0);
 
-        buf.copy_from_slice(data);
+        buf[..data.len()].copy_from_slice(data);
 
         // Write to the USB device via the endpoint.
-        self.bulk_endpoint_handle
-            .write_bulk(0x02, &buf, BULK_TIMEOUT)?;
+        self.handle
+            .write_bulk(BULK_WRITE_ENDPOINT, &buf, WRITE_TIMEOUT)?;
 
         Ok(())
     }
@@ -107,43 +163,16 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
     fn read(&self) -> Result<Vec<u8>> {
         let mut buf = [0u8; READ_LENGTH];
 
-        Ok(self.device.read(&mut buf).map(|_| buf.to_vec())?)
-    }
-
-    /// Force clear the previous read buffer so that new data can be reported.
-    fn clear_read_buffer(&self) -> Result<()> {
-        let mut buf = [0u8; 1];
-
-        while self.device.read_timeout(&mut buf, 1)? > 0 {
-            // Do nothing.
-        }
-
-        Ok(())
+        self.handle
+            .read_interrupt(INTERRUPT_READ_ENDPOINT, &mut buf, READ_TIMEOUT)
+            .map(|_| buf.to_vec())
     }
 
     /// Return the status of the device.
     pub fn get_status(&self) -> Result<DeviceStatus> {
-        self.clear_read_buffer()?;
-
         self.write(&[0x74, 0x01])?;
         let data = self.read()?;
-
-        // Liquid temp.
-        let temp = (data[15] + data[16] / 10) as i32;
-        let pump_rpm = ((data[18] as i32) << 8) | (data[17] as i32);
-        let pump_duty = data[19] as i32;
-        let fan_rpm = ((data[24] as i32) << 8) | (data[23] as i32);
-        let fan_duty = data[25] as i32;
-
-        let status = DeviceStatus {
-            temp,
-            pump_rpm,
-            pump_duty,
-            fan_rpm,
-            fan_duty,
-        };
-
-        Ok(status)
+        parse_status(&data)
     }
 
     /// Set the pump duty.
@@ -196,33 +225,33 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
 
     /// Set the visual mode for the device.
     pub fn set_visual_mode(&self, mode: u8, index: u8) -> Result<()> {
-        let mut buffer = [0u8; WRITE_LENGTH];
-
-        buffer.fill(0x0);
-
-        buffer[0] = 0x38;
-        buffer[1] = 0x01;
-        buffer[2] = mode;
-        buffer[3] = index;
-
-        self.write(&buffer)?;
+        self.write(&[SWITCH_BUCKET, 0x1, mode, index])?;
 
         Ok(())
     }
 
-    /// Clear the memory bucket at given index.
-    pub fn clear_bucket(&self, index: u8) -> Result<()> {
-        let mut buffer = [0u8; WRITE_LENGTH];
+    /// Switch to custom bucket.
+    pub fn switch_bucket(&self, index: u8) -> Result<()> {
+        self.set_visual_mode(4, index)
+    }
 
-        buffer.fill(0x0);
-
-        buffer[0] = 0x38;
-        buffer[1] = 0x02;
-        buffer[2] = index;
-
-        self.write(&buffer)?;
+    /// Delete all memory buckets from the device.
+    pub fn delete_all_buckets(&self) -> Result<()> {
+        for i in 0..15 {
+            self.delete_bucket(i)?;
+        }
 
         Ok(())
+    }
+
+    /// Send query bucket for given index.
+    pub fn send_query_bucket(&self, index: u8) -> Result<()> {
+        self.write(&[QUERY_BUCKET, 0x04, 0x00, index])
+    }
+
+    /// Clear the memory bucket at given index.
+    pub fn delete_bucket(&self, index: u8) -> Result<()> {
+        self.write(&[SETUP_BUCKET, DELETE_BUCKET, index])
     }
 
     /// Set the device LCD to display liquid temperature.
@@ -243,33 +272,21 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
     /// Set the device LCD brightness.
     pub fn set_brightness(&self, brightness: u8) -> Result<()> {
         if (0..=100).contains(&brightness) {
-            let mut buffer = [0u8; WRITE_LENGTH];
-            buffer.fill(0x0);
-
-            // QUERY
-            buffer[0] = 0x30;
-
-            // BRIGHTNESS
-            buffer[1] = 0x2;
-
-            // SET
-            buffer[2] = 0x1;
-
-            buffer[3] = brightness;
-
-            self.write(&buffer)?;
-
-            return Ok(());
+            return self.write(&[0x30, 0x2, 0x1, brightness]);
         }
 
         Err(eyre!("Duty value is out of bounds"))
     }
 
+    /// Set the device LCD to an image. Will be resized if it does not have height or width of 320px
+    /// Will rotate to the NZXTDevice rotation_degrees amount prior to uploading.
+    /// Does NOT support gif.
+    #[cfg(not(target_os = "windows"))]
     pub fn set_image(
         &self,
         path_to_image: &Path,
         index: u8,
-        apply_image_after_upload: bool,
+        apply_after_upload: bool,
     ) -> Result<()> {
         let mut img = image::open(path_to_image)?;
 
@@ -290,41 +307,37 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
         let image_bytes = img.to_rgba8().into_raw();
         let image_size_bytes = image_bytes.len() as i32;
 
-        self.upload_image(
-            &image_bytes,
-            image_size_bytes,
-            index,
-            apply_image_after_upload,
-        )?;
-
-        Ok(())
+        self.upload_image(&image_bytes, image_size_bytes, index, apply_after_upload)
     }
 
+    /// Upload an image (either still or gif) to the device.
+    #[cfg(not(target_os = "windows"))]
     fn upload_image(
         &self,
         image_bytes: &[u8],
         image_size_bytes: i32,
         index: u8,
-        apply_image_after_upload: bool,
+        apply_after_upload: bool,
     ) -> Result<()> {
-        self.set_visual_mode(1, index)?;
-        self.clear_bucket(index)?;
+        self.set_blank_screen()?;
+        self.delete_bucket(index)?;
 
-        let memory_slot = index as u16 * 800;
+        let memory_slot = 800 * index as u16;
+        // Memory slots are in 1kb sections
         let memory_slot_count = (image_size_bytes / 1024) as u16;
 
         self.setup_bucket(index, index + 1, memory_slot, memory_slot_count)?;
         self.write_start_bucket(index)?;
         self.send_bulk_data_info(2)?;
 
-        // Time to write the image bytes!
-        self.bulk_endpoint_handle
-            .write_bulk(0x02, image_bytes, BULK_TIMEOUT)?;
+        // Write image bytes to BULK endpoint.
+        self.handle
+            .write_bulk(BULK_WRITE_ENDPOINT, image_bytes, WRITE_TIMEOUT)?;
 
         self.write_finish_bucket(index)?;
 
-        if apply_image_after_upload {
-            self.set_visual_mode(4, index)?;
+        if apply_after_upload {
+            self.switch_bucket(index)?;
         }
 
         Ok(())
@@ -338,79 +351,55 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
         memory_slot: u16,
         memory_slot_count: u16,
     ) -> Result<()> {
-        let mut buffer = [0u8; WRITE_LENGTH];
-
-        buffer.fill(0x0);
-
-        buffer[0] = 0x32;
-        buffer[1] = 0x01;
-        buffer[2] = index;
-        buffer[3] = id;
-        buffer[4] = (memory_slot >> 8) as u8;
-        buffer[5] = memory_slot as u8;
-        buffer[6] = memory_slot_count as u8;
-        buffer[7] = (memory_slot_count >> 8) as u8;
-        buffer[8] = 1;
-
-        self.write(&buffer)?;
-
-        Ok(())
+        self.write(&[
+            SETUP_BUCKET,
+            SET_BUCKET,
+            index,
+            id,
+            (memory_slot >> 8) as u8,
+            memory_slot as u8,
+            memory_slot_count as u8,
+            (memory_slot_count >> 8) as u8,
+            1,
+        ])
     }
 
     /// Send the write start to given bucket.
     pub fn write_start_bucket(&self, index: u8) -> Result<()> {
-        let mut buffer = [0u8; WRITE_LENGTH];
-
-        buffer.fill(0x0);
-
-        buffer[0] = 0x36;
-        buffer[1] = 0x1;
-        buffer[2] = index;
-
-        self.write(&buffer)?;
-
-        Ok(())
+        self.write(&[WRITE_SETUP, WRITE_START, index])
     }
 
+    /// Send the write finish to given bucket.
     pub fn write_finish_bucket(&self, index: u8) -> Result<()> {
-        let mut buffer = [0u8; WRITE_LENGTH];
-
-        buffer.fill(0x0);
-
-        buffer[0] = 0x36;
-        buffer[1] = 0x2;
-        buffer[2] = index;
-
-        self.write(&buffer)?;
-
-        Ok(())
+        self.write(&[WRITE_SETUP, WRITE_FINISH, index])
     }
 
+    /// Send the bulk data info for the given mode.
     pub fn send_bulk_data_info(&self, mode: u8) -> Result<()> {
-        let mut buffer = [0u8; BULK_WRITE_LENGTH];
-        buffer.fill(0x0);
+        // Fill with 12fa01e8abcdef987654321 (magic numbers) and then mode,
+        // couple of 0x00 and then more magic.
+        self.write_bulk(&[
+            0x12, 0xfa, 0x01, 0xe8, 0xab, 0xcd, 0xef, 0x98, 0x76, 0x54, 0x32, 0x10, mode, 0x00,
+            0x00, 0x00, 0x00, 0x40, 0x96,
+        ])
+    }
+}
 
-        // Fill with 12fa01e8abcdef987654321 (magic numbers) and then mode.
-        buffer[0] = 0x12;
-        buffer[1] = 0xfa;
-        buffer[2] = 0x01;
-        buffer[3] = 0xe8;
-        buffer[4] = 0xab;
-        buffer[5] = 0xcd;
-        buffer[6] = 0xef;
-        buffer[7] = 0x98;
-        buffer[8] = 0x76;
-        buffer[9] = 0x54;
-        buffer[10] = 0x32;
-        buffer[11] = 0x10;
-        buffer[12] = mode;
-        // More magic?
-        buffer[17] = 0x40;
-        buffer[18] = 0x96;
+impl Drop for NZXTDevice<'_> {
+    /// Upon dropping NZXTDevice, ensure all interfaces are released and the device is reset.
+    fn drop(&mut self) {
+        #[cfg(not(target_os = "windows"))]
+        self.handle
+            .release_interface(0)
+            .expect("Error releasing interface 0 for NZXTDevice.");
 
-        self.write_bulk(&buffer)?;
+        self.handle
+            .release_interface(1)
+            .expect("Error releasing interface 1 for NZXTDevice.");
 
-        Ok(())
+        self.handle
+            .reset()
+            .expect("Error resetting the NZXTDevice.");
     }
 }
 
@@ -421,4 +410,225 @@ fn parse_firmware_info(data: &[u8]) -> String {
     let patch = data[0x13];
 
     format!("version {}.{}.{}", major, minor, patch)
+}
+
+/// Parse the response bytes into a device status.
+fn parse_status(data: &[u8]) -> Result<DeviceStatus> {
+    // Liquid temp.
+    let temp = (data[15] + data[16] / 10) as i32;
+    let pump_rpm = ((data[18] as i32) << 8) | (data[17] as i32);
+    let pump_duty = data[19] as i32;
+    let fan_rpm = ((data[24] as i32) << 8) | (data[23] as i32);
+    let fan_duty = data[25] as i32;
+
+    let status = DeviceStatus {
+        temp,
+        pump_rpm,
+        pump_duty,
+        fan_rpm,
+        fan_duty,
+    };
+
+    Ok(status)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn setup_mocks() -> MockNZXTDeviceHandle {
+        let mut mock_nzxt_device_handle = MockNZXTDeviceHandle::new();
+
+        mock_nzxt_device_handle
+            .expect_claim_interface()
+            .returning(|_| Ok(()));
+
+        mock_nzxt_device_handle
+            .expect_release_interface()
+            .returning(|_| Ok(()));
+
+        #[cfg(not(target_os = "windows"))]
+        mock_nzxt_device_handle
+            .expect_set_auto_detach_kernel_driver()
+            .returning(|_| Ok(()));
+
+        mock_nzxt_device_handle.expect_reset().returning(|| Ok(()));
+
+        mock_nzxt_device_handle
+    }
+
+    #[test]
+    fn test_new_device_success() {
+        let mut mock_nzxt_device_handle = setup_mocks();
+
+        // Mock the successful read of the device info.
+        mock_nzxt_device_handle
+            .expect_read_interrupt()
+            .returning(|_, _, _| Ok(READ_LENGTH as usize));
+
+        let mock_nzxt_device = NZXTDevice::new(&mut mock_nzxt_device_handle, 90);
+        assert!(mock_nzxt_device.is_ok());
+    }
+
+    #[test]
+    fn test_new_device_fail() {
+        let mut mock_nzxt_device_handle = setup_mocks();
+
+        // Mock the failure to read from device handle.
+        mock_nzxt_device_handle
+            .expect_read_interrupt()
+            .returning(|_, _, _| Err(eyre!("Mock error")));
+
+        let mock_nzxt_device = NZXTDevice::new(&mut mock_nzxt_device_handle, 90);
+        assert!(mock_nzxt_device.is_err());
+    }
+
+    #[test]
+    fn test_get_status() {
+        let mut mock_nzxt_device_handle = setup_mocks();
+
+        mock_nzxt_device_handle
+            .expect_write_interrupt()
+            .returning(|_, data, _| Ok(data.len() as usize));
+
+        mock_nzxt_device_handle
+            .expect_read_interrupt()
+            .returning(|_, data, _| {
+                // Successful response taken from real device.
+                let response: [u8; READ_LENGTH] = [
+                    117, 1, 57, 0, 42, 0, 24, 81, 57, 48, 51, 54, 50, 56, 1, 30, 9, 58, 9, 80, 80,
+                    1, 2, 193, 6, 80, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                ];
+                data.copy_from_slice(&response);
+                Ok(READ_LENGTH as usize)
+            });
+
+        let mock_nzxt_device = NZXTDevice::new(&mut mock_nzxt_device_handle, 90);
+        assert!(mock_nzxt_device.is_ok());
+
+        let mock_nzxt_device = mock_nzxt_device.unwrap();
+        let status = mock_nzxt_device.get_status();
+        assert!(status.is_ok());
+
+        let status = status.unwrap();
+        assert_eq!(status.temp, 30);
+        assert_eq!(status.pump_duty, 80);
+        assert_eq!(status.pump_rpm, 2362);
+        assert_eq!(status.fan_duty, 80);
+        assert_eq!(status.fan_rpm, 1729);
+    }
+
+    #[test]
+    fn test_parse_firmware_version() {
+        let data: [u8; READ_LENGTH] = [
+            17, 1, 57, 0, 42, 0, 24, 81, 57, 48, 51, 54, 50, 56, 8, 48, 1, 5, 7, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
+
+        let firmware_version = parse_firmware_info(&data);
+
+        assert_eq!(firmware_version, "version 5.7.0");
+    }
+
+    #[test]
+    fn test_parse_status() {
+        // Successful response taken from real device.
+        let response: [u8; READ_LENGTH] = [
+            117, 1, 57, 0, 42, 0, 24, 81, 57, 48, 51, 54, 50, 56, 1, 30, 9, 58, 9, 80, 80, 1, 2,
+            193, 6, 80, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
+
+        let status = parse_status(&response);
+
+        assert!(status.is_ok());
+
+        let status = status.unwrap();
+
+        assert_eq!(status.temp, 30);
+        assert_eq!(status.pump_duty, 80);
+        assert_eq!(status.pump_rpm, 2362);
+        assert_eq!(status.fan_duty, 80);
+        assert_eq!(status.fan_rpm, 1729);
+    }
+
+    #[test]
+    fn test_set_brightness() {
+        let mut mock_nzxt_device_handle = setup_mocks();
+
+        // Mock the successful read of the device info.
+        mock_nzxt_device_handle
+            .expect_read_interrupt()
+            .returning(|_, _, _| Ok(READ_LENGTH as usize));
+
+        // Mock the successful write to device, expecting only 2 writes to occur.
+        mock_nzxt_device_handle
+            .expect_write_interrupt()
+            .times(2)
+            .returning(|_, data, _| Ok(data.len() as usize));
+
+        let mock_nzxt_device = NZXTDevice::new(&mut mock_nzxt_device_handle, 90).unwrap();
+
+        // Both the next two assertions should be fine.
+        let result = mock_nzxt_device.set_brightness(100);
+        assert!(result.is_ok());
+
+        let result = mock_nzxt_device.set_brightness(0);
+        assert!(result.is_ok());
+
+        // Should fail, given value is over 100.
+        let result = mock_nzxt_device.set_brightness(101);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_set_pump_duty() {
+        let mut mock_nzxt_device_handle = setup_mocks();
+
+        // Mock the successful read of the device info.
+        mock_nzxt_device_handle
+            .expect_read_interrupt()
+            .returning(|_, _, _| Ok(READ_LENGTH as usize));
+
+        // Mock the successful write to device, expecting only 2 writes to occur.
+        mock_nzxt_device_handle
+            .expect_write_interrupt()
+            .times(2)
+            .returning(|_, data, _| Ok(data.len() as usize));
+
+        let mock_nzxt_device = NZXTDevice::new(&mut mock_nzxt_device_handle, 90).unwrap();
+
+        let result = mock_nzxt_device.set_pump_duty(100);
+        assert!(result.is_ok());
+
+        let result = mock_nzxt_device.set_pump_duty(20);
+        assert!(result.is_ok());
+
+        let result = mock_nzxt_device.set_pump_duty(19);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_set_visual_mode() {
+        let mut mock_nzxt_device_handle = setup_mocks();
+
+        // Mock the successful read of the device info.
+        mock_nzxt_device_handle
+            .expect_read_interrupt()
+            .returning(|_, _, _| Ok(READ_LENGTH as usize));
+
+        // Mock the successful write to device, expecting only 1 write to occur.
+        mock_nzxt_device_handle
+            .expect_write_interrupt()
+            .times(1)
+            .returning(|_, data, _| Ok(data.len() as usize));
+
+        let mock_nzxt_device = NZXTDevice::new(&mut mock_nzxt_device_handle, 90).unwrap();
+
+        let result = mock_nzxt_device.set_visual_mode(0, 0);
+
+        assert!(result.is_ok());
+    }
 }
