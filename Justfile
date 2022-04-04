@@ -14,3 +14,9 @@ test:
 # Format all code using rustfmt
 fmt:
 	cargo fmt --all
+
+# Generate and upload code coverage to codecov.
+# Requires CODECOV_TOKEN env var to be set
+coverage:
+	cargo tarpaulin --out Xml
+	bash <(curl -s https://codecov.io/bash)
