@@ -28,3 +28,5 @@ jobs:
         run: just test
       - name: Generate coverage
         run: just coverage
+      - name: Upload coverage
+        run: bash <(curl -s https://codecov.io/bash)

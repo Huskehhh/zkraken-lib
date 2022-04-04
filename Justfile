@@ -19,4 +19,4 @@ fmt:
 # Requires CODECOV_TOKEN env var to be set
 coverage:
 	cargo tarpaulin --out Xml
-	bash <(curl -s https://codecov.io/bash)
+
