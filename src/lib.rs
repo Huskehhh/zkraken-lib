@@ -90,8 +90,6 @@ impl<T: UsbContext> NZXTDeviceHandle for DeviceHandle<T> {
     fn set_auto_detach_kernel_driver(&mut self, auto_detach: bool) -> Result<()> {
         Ok(self.set_auto_detach_kernel_driver(auto_detach)?)
     }
-
-
 }
 
 pub struct NZXTDevice<'a> {
@@ -438,7 +436,9 @@ fn parse_status(data: &[u8]) -> Result<DeviceStatus> {
 mod tests {
     use super::*;
 
-    fn setup_mocks(mock_nzxt_device_handle: &mut MockNZXTDeviceHandle) {
+    fn setup_mocks() -> MockNZXTDeviceHandle {
+        let mut mock_nzxt_device_handle = MockNZXTDeviceHandle::new();
+
         mock_nzxt_device_handle
             .expect_claim_interface()
             .returning(|_| Ok(()));
@@ -453,13 +453,13 @@ mod tests {
             .returning(|_| Ok(()));
 
         mock_nzxt_device_handle.expect_reset().returning(|| Ok(()));
+
+        mock_nzxt_device_handle
     }
 
     #[test]
     fn test_new_device_success() {
-        let mut mock_nzxt_device_handle = MockNZXTDeviceHandle::new();
-
-        setup_mocks(&mut mock_nzxt_device_handle);
+        let mut mock_nzxt_device_handle = setup_mocks();
 
         // Mock the successful read of the device info.
         mock_nzxt_device_handle
@@ -472,9 +472,7 @@ mod tests {
 
     #[test]
     fn test_new_device_fail() {
-        let mut mock_nzxt_device_handle = MockNZXTDeviceHandle::new();
-
-        setup_mocks(&mut mock_nzxt_device_handle);
+        let mut mock_nzxt_device_handle = setup_mocks();
 
         // Mock the failure to read from device handle.
         mock_nzxt_device_handle
@@ -487,9 +485,7 @@ mod tests {
 
     #[test]
     fn test_get_status() {
-        let mut mock_nzxt_device_handle = MockNZXTDeviceHandle::new();
-
-        setup_mocks(&mut mock_nzxt_device_handle);
+        let mut mock_nzxt_device_handle = setup_mocks();
 
         mock_nzxt_device_handle
             .expect_write_interrupt()
@@ -556,5 +552,83 @@ mod tests {
         assert_eq!(status.pump_rpm, 2362);
         assert_eq!(status.fan_duty, 80);
         assert_eq!(status.fan_rpm, 1729);
+    }
+
+    #[test]
+    fn test_set_brightness() {
+        let mut mock_nzxt_device_handle = setup_mocks();
+
+        // Mock the successful read of the device info.
+        mock_nzxt_device_handle
+            .expect_read_interrupt()
+            .returning(|_, _, _| Ok(READ_LENGTH as usize));
+
+        // Mock the successful write to device, expecting only 2 writes to occur.
+        mock_nzxt_device_handle
+            .expect_write_interrupt()
+            .times(2)
+            .returning(|_, data, _| Ok(data.len() as usize));
+
+        let mock_nzxt_device = NZXTDevice::new(&mut mock_nzxt_device_handle, 90).unwrap();
+
+        // Both the next two assertions should be fine.
+        let result = mock_nzxt_device.set_brightness(100);
+        assert!(result.is_ok());
+
+        let result = mock_nzxt_device.set_brightness(0);
+        assert!(result.is_ok());
+
+        // Should fail, given value is over 100.
+        let result = mock_nzxt_device.set_brightness(101);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_set_pump_duty() {
+        let mut mock_nzxt_device_handle = setup_mocks();
+
+        // Mock the successful read of the device info.
+        mock_nzxt_device_handle
+            .expect_read_interrupt()
+            .returning(|_, _, _| Ok(READ_LENGTH as usize));
+
+        // Mock the successful write to device, expecting only 2 writes to occur.
+        mock_nzxt_device_handle
+            .expect_write_interrupt()
+            .times(2)
+            .returning(|_, data, _| Ok(data.len() as usize));
+
+        let mock_nzxt_device = NZXTDevice::new(&mut mock_nzxt_device_handle, 90).unwrap();
+
+        let result = mock_nzxt_device.set_pump_duty(100);
+        assert!(result.is_ok());
+
+        let result = mock_nzxt_device.set_pump_duty(20);
+        assert!(result.is_ok());
+
+        let result = mock_nzxt_device.set_pump_duty(19);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_set_visual_mode() {
+        let mut mock_nzxt_device_handle = setup_mocks();
+
+        // Mock the successful read of the device info.
+        mock_nzxt_device_handle
+            .expect_read_interrupt()
+            .returning(|_, _, _| Ok(READ_LENGTH as usize));
+
+        // Mock the successful write to device, expecting only 1 write to occur.
+        mock_nzxt_device_handle
+            .expect_write_interrupt()
+            .times(1)
+            .returning(|_, data, _| Ok(data.len() as usize));
+
+        let mock_nzxt_device = NZXTDevice::new(&mut mock_nzxt_device_handle, 90).unwrap();
+
+        let result = mock_nzxt_device.set_visual_mode(0, 0);
+
+        assert!(result.is_ok());
     }
 }
