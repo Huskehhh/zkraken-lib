@@ -1,8 +1,10 @@
+#[cfg(not(target_os = "windows"))]
 use std::path::Path;
 use std::time::Duration;
 
 use color_eyre::eyre::eyre;
 use color_eyre::eyre::Result;
+#[cfg(not(target_os = "windows"))]
 use image::GenericImageView;
 use rusb::DeviceHandle;
 use rusb::UsbContext;
@@ -54,8 +56,11 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
     /// Create an instance of NZXTDevice.
     pub fn new(handle: &mut DeviceHandle<T>, rotation_degrees: i32) -> Result<NZXTDevice<T>> {
         #[cfg(not(target_os = "windows"))]
-        handle.set_auto_detach_kernel_driver(true)?;
-        handle.claim_interface(0)?;
+        {
+            handle.set_auto_detach_kernel_driver(true)?;
+            handle.claim_interface(0)?;
+        }
+
         handle.claim_interface(1)?;
 
         let nzxt_device = NZXTDevice {
@@ -75,13 +80,13 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
         buf.fill(0x0);
 
         // Copy the data to a new buffer with the correct length.
-        if data.len() > WRITE_LENGTH {
-            buf.copy_from_slice(data);
+        if data.len() <= WRITE_LENGTH {
+            buf[..data.len()].copy_from_slice(data);
         }
 
         // Write to the USB device via the endpoint.
         self.handle
-            .write_interrupt(INTERRUPT_WRITE_ENDPOINT, data, WRITE_TIMEOUT)?;
+            .write_interrupt(INTERRUPT_WRITE_ENDPOINT, &buf, WRITE_TIMEOUT)?;
 
         Ok(())
     }
@@ -91,7 +96,7 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
         let mut buf = [0u8; BULK_WRITE_LENGTH];
         buf.fill(0x0);
 
-        buf[0..data.len()].copy_from_slice(data);
+        buf[..data.len()].copy_from_slice(data);
 
         // Write to the USB device via the endpoint.
         self.handle
@@ -243,6 +248,7 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
     /// Set the device LCD to an image. Will be resized if it does not have height or width of 320px
     /// Will rotate to the NZXTDevice rotation_degrees amount prior to uploading.
     /// Does NOT support gif.
+    #[cfg(not(target_os = "windows"))]
     pub fn set_image(
         &self,
         path_to_image: &Path,
@@ -272,6 +278,7 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
     }
 
     /// Upload an image (either still or gif) to the device.
+    #[cfg(not(target_os = "windows"))]
     fn upload_image(
         &self,
         image_bytes: &[u8],
@@ -348,13 +355,14 @@ impl<T: UsbContext> NZXTDevice<'_, T> {
 impl<T: UsbContext> Drop for NZXTDevice<'_, T> {
     /// Upon dropping NZXTDevice, ensure all interfaces are released and the device is reset.
     fn drop(&mut self) {
+        #[cfg(not(target_os = "windows"))]
         self.handle
             .release_interface(0)
             .expect("Error releasing interface 0 for NZXTDevice.");
 
         self.handle
             .release_interface(1)
-            .expect("Error releasing interface 0 for NZXTDevice.");
+            .expect("Error releasing interface 1 for NZXTDevice.");
 
         self.handle
             .reset()
