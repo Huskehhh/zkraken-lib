@@ -1,6 +1,6 @@
 [package]
 name = "zkraken-lib"
-version = "0.2.0"
+version = "0.1.0"
 edition = "2021"
 repository = "https://github.com/Huskehhh/zkraken-lib"
 description = "A cross-platform driver library for the Kraken Z series AIO coolers written in Rust. "
