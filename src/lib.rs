@@ -123,9 +123,6 @@ impl NZXTDevice<'_> {
             rotation_degrees,
         };
 
-        // Throw away the response bytes.
-        nzxt_device.read()?;
-
         Ok(nzxt_device)
     }
 
