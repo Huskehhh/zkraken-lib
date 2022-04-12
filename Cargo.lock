@@ -950,7 +950,7 @@ checksum = "d8b77fdfd5a253be4ab714e4ffa3c49caf146b4de743e97510c0656cf90f1e8e"
 
 [[package]]
 name = "zkraken-lib"
-version = "0.2.0-alpha"
+version = "0.2.0"
 dependencies = [
  "color-eyre",
  "image",
